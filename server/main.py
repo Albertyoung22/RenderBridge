@@ -72,14 +72,16 @@ async def proxy_handler(client_id: str, path: str, request: Request):
     target_client = client_id
     actual_path = path
 
-    # Case 1: The client_id is valid
+    # If the requested client_id is NOT a connected client
     if target_client not in active_tunnels:
-        # Case 2: Smart fallback - if only one client is online, assume the user missed the prefix
-        # This helps with relative paths like /static/js/... which browser requests without the prefix
+        # Check if there is exactly ONE client connected
         if len(active_tunnels) == 1:
+            # Fallback: Assume this is a path that belongs to the only connected client
             target_client = list(active_tunnels.keys())[0]
-            # In this case, the original 'client_id' was actually the start of the path
-            actual_path = f"{client_id}/{path}" if path else client_id
+            # Reconstruct the full path
+            full_path = f"{client_id}/{path}" if path else client_id
+            actual_path = full_path
+            logger.info(f"Smart-routing request /{full_path} to single client: {target_client}")
         else:
             return JSONResponse(status_code=404, content={
                 "error": f"Tunnel '{client_id}' not found.",
