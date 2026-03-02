@@ -69,21 +69,27 @@ async def tunnel_endpoint(websocket: WebSocket, client_id: str, token: str = Non
 
 @app.api_route("/{client_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy_handler(client_id: str, path: str, request: Request):
-    # If the path is empty, it means the user accessed /client_id/
-    # If client_id is not in active_tunnels, but it's part of a longer path, 
-    # FastAPI handles it, but we need to verify the client exists.
-    
-    if client_id not in active_tunnels:
-        # Check if the root route was intended
-        return JSONResponse(status_code=404, content={
-            "error": f"Tunnel '{client_id}' not found or offline.",
-            "available_tunnels": list(active_tunnels.keys())
-        })
+    target_client = client_id
+    actual_path = path
 
-    websocket = active_tunnels[client_id]
+    # Case 1: The client_id is valid
+    if target_client not in active_tunnels:
+        # Case 2: Smart fallback - if only one client is online, assume the user missed the prefix
+        # This helps with relative paths like /static/js/... which browser requests without the prefix
+        if len(active_tunnels) == 1:
+            target_client = list(active_tunnels.keys())[0]
+            # In this case, the original 'client_id' was actually the start of the path
+            actual_path = f"{client_id}/{path}" if path else client_id
+        else:
+            return JSONResponse(status_code=404, content={
+                "error": f"Tunnel '{client_id}' not found.",
+                "available_tunnels": list(active_tunnels.keys())
+            })
+
+    websocket = active_tunnels[target_client]
     request_id = str(uuid.uuid4())
     
-    # Extract headers (excluding host to avoid issues with local forwarding)
+    # Extract headers (excluding host)
     headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
     
     # Read body
@@ -92,15 +98,13 @@ async def proxy_handler(client_id: str, path: str, request: Request):
     try:
         body_str = body_bytes.decode("utf-8") if body_bytes else None
     except UnicodeDecodeError:
-        # If not utf-8, could handle as base64 but keeping it simple for now
         body_str = "[Binary Data]"
 
-    # Prepare the packet to send via WebSocket
     tunnel_packet = {
         "type": "request",
         "request_id": request_id,
         "method": request.method,
-        "path": path,
+        "path": actual_path,
         "query": str(request.query_params),
         "headers": headers,
         "body": body_str
