@@ -3,6 +3,7 @@ import json
 import uuid
 import asyncio
 import logging
+import base64
 from typing import Dict
 from fastapi import FastAPI, WebSocket, Request, Response, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -94,13 +95,9 @@ async def proxy_handler(client_id: str, path: str, request: Request):
     # Extract headers (excluding host)
     headers = {k: v for k, v in request.headers.items() if k.lower() != "host"}
     
-    # Read body
+    # CRITICAL: Use Base64 for ALL bodies to support binary/MP3
     body_bytes = await request.body()
-    body_str = None
-    try:
-        body_str = body_bytes.decode("utf-8") if body_bytes else None
-    except UnicodeDecodeError:
-        body_str = "[Binary Data]"
+    body_b64 = base64.b64encode(body_bytes).decode('utf-8') if body_bytes else None
 
     tunnel_packet = {
         "type": "request",
@@ -109,7 +106,8 @@ async def proxy_handler(client_id: str, path: str, request: Request):
         "path": actual_path,
         "query": str(request.query_params),
         "headers": headers,
-        "body": body_str
+        "body": body_b64,
+        "is_base64": True
     }
     
     # Send request to client
@@ -124,12 +122,16 @@ async def proxy_handler(client_id: str, path: str, request: Request):
     pending_requests[request_id] = future
     
     try:
-        # Wait for response from client with timeout
-        response_data = await asyncio.wait_for(future, timeout=30.0)
+        # Wait for response from client with increased timeout for larger files
+        response_data = await asyncio.wait_for(future, timeout=60.0)
+        
+        # Decode response body from base64
+        resp_body_b64 = response_data.get("body")
+        resp_body_bytes = base64.b64decode(resp_body_b64) if resp_body_b64 else b""
         
         # Construct and return the response
         return Response(
-            content=response_data.get("body"),
+            content=resp_body_bytes,
             status_code=response_data.get("status_code", 200),
             headers=response_data.get("headers", {})
         )
