@@ -69,8 +69,16 @@ async def tunnel_endpoint(websocket: WebSocket, client_id: str, token: str = Non
 
 @app.api_route("/{client_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy_handler(client_id: str, path: str, request: Request):
+    # If the path is empty, it means the user accessed /client_id/
+    # If client_id is not in active_tunnels, but it's part of a longer path, 
+    # FastAPI handles it, but we need to verify the client exists.
+    
     if client_id not in active_tunnels:
-        return JSONResponse(status_code=404, content={"error": f"Tunnel '{client_id}' not found or offline."})
+        # Check if the root route was intended
+        return JSONResponse(status_code=404, content={
+            "error": f"Tunnel '{client_id}' not found or offline.",
+            "available_tunnels": list(active_tunnels.keys())
+        })
 
     websocket = active_tunnels[client_id]
     request_id = str(uuid.uuid4())
