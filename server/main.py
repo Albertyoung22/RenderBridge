@@ -129,11 +129,20 @@ async def proxy_handler(client_id: str, path: str, request: Request):
         resp_body_b64 = response_data.get("body")
         resp_body_bytes = base64.b64decode(resp_body_b64) if resp_body_b64 else b""
         
+        # Prepare response headers
+        resp_headers = dict(response_data.get("headers", {}))
+        
+        # CRITICAL: Remove Content-Length because the original length (from local)
+        # doesn't match the final processed length after tunnel transport.
+        # FastAPI/Starlette will recalculate this correctly.
+        resp_headers.pop("content-length", None)
+        resp_headers.pop("Content-Length", None)
+        
         # Construct and return the response
         return Response(
             content=resp_body_bytes,
             status_code=response_data.get("status_code", 200),
-            headers=response_data.get("headers", {})
+            headers=resp_headers
         )
     except asyncio.TimeoutError:
         return JSONResponse(status_code=504, content={"error": "Gateway Timeout: Client took too long to respond."})
