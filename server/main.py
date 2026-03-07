@@ -68,6 +68,69 @@ async def tunnel_endpoint(websocket: WebSocket, client_id: str, token: str = Non
         if client_id in active_tunnels:
             del active_tunnels[client_id]
 
+@app.websocket("/{client_id}/{path:path}")
+async def ws_proxy_handler(websocket: WebSocket, client_id: str, path: str):
+    target_client = client_id
+    actual_path = path
+
+    # Smart routing for single client
+    if target_client not in active_tunnels:
+        if len(active_tunnels) == 1:
+            target_client = list(active_tunnels.keys())[0]
+            actual_path = f"{client_id}/{path}" if path else client_id
+        else:
+            await websocket.close(code=4004)
+            return
+
+    tunnel_ws = active_tunnels[target_client]
+    request_id = str(uuid.uuid4())
+    
+    await websocket.accept()
+    logger.info(f"WS Proxy: Upgrading connection for {client_id}/{path} -> {target_client}")
+
+    # Step 1: Tell the Tunnel Client (Teacher Bridge) to open a local WS connection
+    tunnel_packet = {
+        "type": "ws_open",
+        "request_id": request_id,
+        "path": actual_path,
+        "query": str(websocket.query_params),
+        "headers": dict(websocket.headers)
+    }
+    
+    try:
+        await tunnel_ws.send_text(json.dumps(tunnel_packet))
+    except:
+        await websocket.close()
+        return
+
+    # Step 2: Create a bi-directional relay
+    # We need a way to correlate the messages. 
+    # For simplicity in this specific bridge, we'll store the browser WS in a dict
+    pending_requests[request_id] = websocket
+    
+    try:
+        while True:
+            # Receive from Browser/Student
+            data = await websocket.receive_text()
+            # Send to Tunnel Client (Teacher Bridge)
+            await tunnel_ws.send_text(json.dumps({
+                "type": "ws_message",
+                "request_id": request_id,
+                "data": data
+            }))
+    except Exception as e:
+        logger.info(f"WS Proxy disconnected: {e}")
+    finally:
+        if request_id in pending_requests:
+            del pending_requests[request_id]
+        # Notify Tunnel Client to close local connection
+        try:
+            await tunnel_ws.send_text(json.dumps({
+                "type": "ws_close",
+                "request_id": request_id
+            }))
+        except: pass
+
 @app.api_route("/{client_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy_handler(client_id: str, path: str, request: Request):
     target_client = client_id
