@@ -8,6 +8,12 @@ from typing import Dict
 from fastapi import FastAPI, WebSocket, Request, Response, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 import httpx
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,7 +28,8 @@ active_tunnels: Dict[str, WebSocket] = {}
 pending_requests: Dict[str, asyncio.Future] = {}
 
 # Secret token for client authentication (should be set via environment variable)
-SECRET_TOKEN = os.environ.get("TUNNEL_SECRET_TOKEN", "default_secret_token")
+SECRET_TOKEN = os.environ.get("TUNNEL_SECRET_TOKEN", "my secret_123")
+
 
 @app.get("/")
 async def root():
@@ -40,11 +47,17 @@ async def tunnel_endpoint(websocket: WebSocket, client_id: str, token: str = Non
     if token is None:
         token = websocket.headers.get("X-Tunnel-Token")
         
-    # Simple token validation
-    if token != SECRET_TOKEN:
-        await websocket.close(code=4003) # Forbidden
-        logger.warning(f"Unauthorized connection attempt for client: {client_id}. Received token: {token}")
-        return
+    # Simple token validation (Robust comparison: ignore spaces and strip quotes)
+    expected_token = SECRET_TOKEN.replace(" ", "").strip('"\'')
+    received_token = (token or "").replace(" ", "").replace("%20", "")
+    
+    if received_token != expected_token:
+        # Also try direct comparison just in case
+        if token != SECRET_TOKEN:
+            await websocket.close(code=4003) # Forbidden
+            logger.warning(f"Unauthorized connection attempt for client: {client_id}. Expected: '{SECRET_TOKEN}', Received: '{token}'")
+            return
+
 
     await websocket.accept()
     active_tunnels[client_id] = websocket
