@@ -40,12 +40,12 @@ async def root():
     }
 
 @app.websocket("/tunnel/{client_id}")
-async def tunnel_endpoint(websocket: WebSocket, client_id: str, token: str = None):
-    # Explicitly get token from query params or headers if not provided by FastAPI
-    if token is None:
-        token = websocket.query_params.get("token")
+async def tunnel_endpoint(websocket: WebSocket, client_id: str):
+    # Explicitly get token from query params or headers
+    token = websocket.query_params.get("token")
     if token is None:
         token = websocket.headers.get("X-Tunnel-Token")
+
         
     # Simple token validation (Robust comparison: ignore spaces and strip quotes)
     expected_token = SECRET_TOKEN.replace(" ", "").strip('"\'')
