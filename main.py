@@ -7,6 +7,7 @@ import base64
 from typing import Dict
 from fastapi import FastAPI, WebSocket, Request, Response, WebSocketDisconnect
 from fastapi.responses import JSONResponse
+import httpx
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -236,6 +237,25 @@ async def heartbeat_sender():
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(heartbeat_sender())
+    asyncio.create_task(keep_alive_task())
+
+async def keep_alive_task():
+    """Self-ping to keep Render free tier service awake."""
+    self_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("SELF_URL")
+    if not self_url:
+        logger.info("Keep-alive disabled: RENDER_EXTERNAL_URL or SELF_URL not set.")
+        return
+        
+    logger.info(f"Keep-alive started for: {self_url}")
+    async with httpx.AsyncClient() as client:
+        while True:
+            await asyncio.sleep(600) # Wait 10 minutes
+            try:
+                # Ping the root endpoint
+                await client.get(self_url, timeout=10.0)
+                logger.info("Self-ping successful.")
+            except Exception as e:
+                logger.error(f"Self-ping failed: {e}")
 
 if __name__ == "__main__":
     import uvicorn
