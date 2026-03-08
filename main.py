@@ -28,7 +28,8 @@ active_tunnels: Dict[str, WebSocket] = {}
 pending_requests: Dict[str, asyncio.Future] = {}
 
 # Secret token for client authentication (should be set via environment variable)
-SECRET_TOKEN = os.environ.get("TUNNEL_SECRET_TOKEN", "my secret_123")
+SECRET_TOKEN = os.environ.get("TUNNEL_SECRET_TOKEN", "RelayBell_Secret_888")
+
 
 
 @app.get("/")
