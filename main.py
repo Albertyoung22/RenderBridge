@@ -7,13 +7,6 @@ import base64
 from typing import Dict
 from fastapi import FastAPI, WebSocket, Request, Response, WebSocketDisconnect
 from fastapi.responses import JSONResponse
-import httpx
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass
-
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -28,9 +21,7 @@ active_tunnels: Dict[str, WebSocket] = {}
 pending_requests: Dict[str, asyncio.Future] = {}
 
 # Secret token for client authentication (should be set via environment variable)
-SECRET_TOKEN = os.environ.get("TUNNEL_SECRET_TOKEN", "RelayBell_Secret_888")
-
-
+SECRET_TOKEN = os.environ.get("TUNNEL_SECRET_TOKEN", "default_secret_token")
 
 @app.get("/")
 async def root():
@@ -41,24 +32,12 @@ async def root():
     }
 
 @app.websocket("/tunnel/{client_id}")
-async def tunnel_endpoint(websocket: WebSocket, client_id: str):
-    # Explicitly get token from query params or headers
-    token = websocket.query_params.get("token")
-    if token is None:
-        token = websocket.headers.get("X-Tunnel-Token")
-
-        
-    # Simple token validation (Robust comparison: ignore spaces and strip quotes)
-    expected_token = SECRET_TOKEN.replace(" ", "").strip('"\'')
-    received_token = (token or "").replace(" ", "").replace("%20", "")
-    
-    if received_token != expected_token:
-        # Also try direct comparison just in case
-        if token != SECRET_TOKEN:
-            await websocket.close(code=4003) # Forbidden
-            logger.warning(f"Unauthorized connection attempt for client: {client_id}. Expected: '{SECRET_TOKEN}', Received: '{token}'")
-            return
-
+async def tunnel_endpoint(websocket: WebSocket, client_id: str, token: str = None):
+    # Simple token validation (can be passed via query param or headers)
+    if token != SECRET_TOKEN:
+        await websocket.close(code=4003) # Forbidden
+        logger.warning(f"Unauthorized connection attempt for client: {client_id}")
+        return
 
     await websocket.accept()
     active_tunnels[client_id] = websocket
@@ -88,69 +67,6 @@ async def tunnel_endpoint(websocket: WebSocket, client_id: str):
     finally:
         if client_id in active_tunnels:
             del active_tunnels[client_id]
-
-@app.websocket("/{client_id}/{path:path}")
-async def ws_proxy_handler(websocket: WebSocket, client_id: str, path: str):
-    target_client = client_id
-    actual_path = path
-
-    # Smart routing for single client
-    if target_client not in active_tunnels:
-        if len(active_tunnels) == 1:
-            target_client = list(active_tunnels.keys())[0]
-            actual_path = f"{client_id}/{path}" if path else client_id
-        else:
-            await websocket.close(code=4004)
-            return
-
-    tunnel_ws = active_tunnels[target_client]
-    request_id = str(uuid.uuid4())
-    
-    await websocket.accept()
-    logger.info(f"WS Proxy: Upgrading connection for {client_id}/{path} -> {target_client}")
-
-    # Step 1: Tell the Tunnel Client (Teacher Bridge) to open a local WS connection
-    tunnel_packet = {
-        "type": "ws_open",
-        "request_id": request_id,
-        "path": actual_path,
-        "query": str(websocket.query_params),
-        "headers": dict(websocket.headers)
-    }
-    
-    try:
-        await tunnel_ws.send_text(json.dumps(tunnel_packet))
-    except:
-        await websocket.close()
-        return
-
-    # Step 2: Create a bi-directional relay
-    # We need a way to correlate the messages. 
-    # For simplicity in this specific bridge, we'll store the browser WS in a dict
-    pending_requests[request_id] = websocket
-    
-    try:
-        while True:
-            # Receive from Browser/Student
-            data = await websocket.receive_text()
-            # Send to Tunnel Client (Teacher Bridge)
-            await tunnel_ws.send_text(json.dumps({
-                "type": "ws_message",
-                "request_id": request_id,
-                "data": data
-            }))
-    except Exception as e:
-        logger.info(f"WS Proxy disconnected: {e}")
-    finally:
-        if request_id in pending_requests:
-            del pending_requests[request_id]
-        # Notify Tunnel Client to close local connection
-        try:
-            await tunnel_ws.send_text(json.dumps({
-                "type": "ws_close",
-                "request_id": request_id
-            }))
-        except: pass
 
 @app.api_route("/{client_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy_handler(client_id: str, path: str, request: Request):
@@ -251,25 +167,6 @@ async def heartbeat_sender():
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(heartbeat_sender())
-    asyncio.create_task(keep_alive_task())
-
-async def keep_alive_task():
-    """Self-ping to keep Render free tier service awake."""
-    self_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("SELF_URL")
-    if not self_url:
-        logger.info("Keep-alive disabled: RENDER_EXTERNAL_URL or SELF_URL not set.")
-        return
-        
-    logger.info(f"Keep-alive started for: {self_url}")
-    async with httpx.AsyncClient() as client:
-        while True:
-            await asyncio.sleep(600) # Wait 10 minutes
-            try:
-                # Ping the root endpoint
-                await client.get(self_url, timeout=10.0)
-                logger.info("Self-ping successful.")
-            except Exception as e:
-                logger.error(f"Self-ping failed: {e}")
 
 if __name__ == "__main__":
     import uvicorn
