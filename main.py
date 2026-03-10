@@ -84,28 +84,21 @@ async def proxy_handler(client_id: str, path: str, request: Request):
     target_client = client_id
     actual_path = path
 
-    # If the requested client_id is NOT a connected client
+    # 如果請求的 ID 不在線
     if target_client not in active_tunnels:
-        # Check if there is exactly ONE client connected
-        if len(active_tunnels) == 1:
-            # Fallback: Assume this is a path that belongs to the only connected client
-            target_client = list(active_tunnels.keys())[0]
-            # Reconstruct the full path
+        # 方便功能：只要有任一 Client 在線，就自動選一個（最後連線的）來處理
+        if len(active_tunnels) > 0:
+            # 優先使用歷史連線中最晚加入的那個
+            target_client = list(active_tunnels.keys())[-1]
+            
+            # 重構路徑：如果是沒帶 ID 的請求，把 client_id 部分也當作 path 的一部分
             full_path = f"{client_id}/{path}" if path else client_id
             actual_path = full_path
-            logger.info(f"Smart-routing request /{full_path} to single client: {target_client}")
-        elif len(active_tunnels) > 1:
-            # Multiple clients connected, but no matching ID found in URL
-            # Return a helpful error message listing available tunnels
-            return JSONResponse(status_code=404, content={
-                "error": f"Target ID '{client_id}' not found among multiple connected clients.",
-                "message": "When multiple clients are connected, you MUST use the Client ID in the URL.",
-                "example": f"/{list(active_tunnels.keys())[0]}/your-api-path",
-                "available_tunnels": list(active_tunnels.keys())
-            })
+            
+            logger.info(f"自動路由：將 /{full_path} 轉發至預設客戶端 {target_client} (總在線: {len(active_tunnels)})")
         else:
             return JSONResponse(status_code=404, content={
-                "error": "No tunnel clients are currently connected.",
+                "error": "目前沒有任何客戶端連線，請啟動本地 RenderBridge 程式。",
                 "available_tunnels": []
             })
 
