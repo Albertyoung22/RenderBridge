@@ -39,6 +39,16 @@ async def tunnel_endpoint(websocket: WebSocket, client_id: str, token: str = Non
         logger.warning(f"Unauthorized connection attempt for client: {client_id}")
         return
 
+    # CRITICAL: Prevent ID collisions. Disconnect existing client if same ID connects.
+    if client_id in active_tunnels:
+        logger.info(f"Closing existing connection for client_id: {client_id} to allow new connection.")
+        try:
+            old_ws = active_tunnels[client_id]
+            await old_ws.close(code=1000, reason="New connection with same ID")
+        except:
+            pass
+        del active_tunnels[client_id]
+
     await websocket.accept()
     active_tunnels[client_id] = websocket
     logger.info(f"Tunnel established for client: {client_id}")
@@ -65,90 +75,32 @@ async def tunnel_endpoint(websocket: WebSocket, client_id: str, token: str = Non
     except Exception as e:
         logger.error(f"Error in tunnel {client_id}: {e}")
     finally:
-        if client_id in active_tunnels:
+        # Only delete if it's the SAME websocket instance (to avoid race conditions)
+        if active_tunnels.get(client_id) == websocket:
             del active_tunnels[client_id]
-
-@app.websocket("/{client_id}/{path:path}")
-async def ws_proxy_handler(websocket: WebSocket, client_id: str, path: str):
-    target_client = client_id
-    actual_path = path
-
-    # Smart routing for single client
-    if target_client not in active_tunnels:
-        if len(active_tunnels) == 1:
-            target_client = list(active_tunnels.keys())[0]
-            actual_path = f"{client_id}/{path}" if path else client_id
-        else:
-            await websocket.close(code=4004)
-            return
-
-    tunnel_ws = active_tunnels[target_client]
-    request_id = str(uuid.uuid4())
-    
-    await websocket.accept()
-    logger.info(f"WS Proxy: Upgrading connection for {client_id}/{path} -> {target_client}")
-
-    # Step 1: Tell the Tunnel Client (Teacher Bridge) to open a local WS connection
-    tunnel_packet = {
-        "type": "ws_open",
-        "request_id": request_id,
-        "path": actual_path,
-        "query": str(websocket.query_params),
-        "headers": dict(websocket.headers)
-    }
-    
-    try:
-        await tunnel_ws.send_text(json.dumps(tunnel_packet))
-    except:
-        await websocket.close()
-        return
-
-    # Step 2: Create a bi-directional relay
-    # We need a way to correlate the messages. 
-    # For simplicity in this specific bridge, we'll store the browser WS in a dict
-    pending_requests[request_id] = websocket
-    
-    try:
-        while True:
-            # Receive from Browser/Student
-            data = await websocket.receive_text()
-            # Send to Tunnel Client (Teacher Bridge)
-            await tunnel_ws.send_text(json.dumps({
-                "type": "ws_message",
-                "request_id": request_id,
-                "data": data
-            }))
-    except Exception as e:
-        logger.info(f"WS Proxy disconnected: {e}")
-    finally:
-        if request_id in pending_requests:
-            del pending_requests[request_id]
-        # Notify Tunnel Client to close local connection
-        try:
-            await tunnel_ws.send_text(json.dumps({
-                "type": "ws_close",
-                "request_id": request_id
-            }))
-        except: pass
 
 @app.api_route("/{client_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy_handler(client_id: str, path: str, request: Request):
     target_client = client_id
     actual_path = path
+    id_from_url = True
 
-    # If the requested client_id is NOT a connected client
+    # 1. 檢查網址路徑的第一段是否為有效的 Client ID
     if target_client not in active_tunnels:
-        # Check if there is exactly ONE client connected
-        if len(active_tunnels) == 1:
-            # Fallback: Assume this is a path that belongs to the only connected client
-            target_client = list(active_tunnels.keys())[0]
-            # Reconstruct the full path
-            full_path = f"{client_id}/{path}" if path else client_id
-            actual_path = full_path
-            logger.info(f"Smart-routing request /{full_path} to single client: {target_client}")
+        id_from_url = False
+        # 2. 如果網址不匹配，嘗試從 Cookie 讀取記憶中的 Client ID
+        cookie_client = request.cookies.get("tunnel_client")
+        
+        if cookie_client in active_tunnels:
+            target_client = cookie_client
+            # 因為是從 Cookie 來的，原本網址的第一段其實是路徑的一部分
+            actual_path = f"{client_id}/{path}" if path else client_id
+            logger.info(f"Cookie 路由：根據 Cookie 將請求導向至 {target_client}")
         else:
+            # 3. 如果都沒有，才回報 404
             return JSONResponse(status_code=404, content={
-                "error": f"Tunnel '{client_id}' not found.",
+                "error": f"找不到客戶端 '{client_id}' 且沒有有效的會話 Cookie。",
+                "message": "請先存取 https://您的網址/您的ID/ 以建立連線記憶。",
                 "available_tunnels": list(active_tunnels.keys())
             })
 
@@ -202,11 +154,23 @@ async def proxy_handler(client_id: str, path: str, request: Request):
         resp_headers.pop("Content-Length", None)
         
         # Construct and return the response
-        return Response(
+        response = Response(
             content=resp_body_bytes,
             status_code=response_data.get("status_code", 200),
             headers=resp_headers
         )
+
+        # 如果是透過網址明確指定 ID 進入的，幫瀏覽器種下 Cookie 記憶
+        if id_from_url:
+            response.set_cookie(
+                key="tunnel_client", 
+                value=target_client, 
+                max_age=3600 * 24, # 記憶一天
+                httponly=True,
+                samesite="lax"
+            )
+            
+        return response
     except asyncio.TimeoutError:
         return JSONResponse(status_code=504, content={"error": "Gateway Timeout: Client took too long to respond."})
     except Exception as e:
