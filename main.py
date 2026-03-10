@@ -83,23 +83,25 @@ async def tunnel_endpoint(websocket: WebSocket, client_id: str, token: str = Non
 async def proxy_handler(client_id: str, path: str, request: Request):
     target_client = client_id
     actual_path = path
+    id_from_url = True
 
-    # 如果請求的 ID 不在線
+    # 1. 檢查網址路徑的第一段是否為有效的 Client ID
     if target_client not in active_tunnels:
-        # 方便功能：只要有任一 Client 在線，就自動選一個（最後連線的）來處理
-        if len(active_tunnels) > 0:
-            # 優先使用歷史連線中最晚加入的那個
-            target_client = list(active_tunnels.keys())[-1]
-            
-            # 重構路徑：如果是沒帶 ID 的請求，把 client_id 部分也當作 path 的一部分
-            full_path = f"{client_id}/{path}" if path else client_id
-            actual_path = full_path
-            
-            logger.info(f"自動路由：將 /{full_path} 轉發至預設客戶端 {target_client} (總在線: {len(active_tunnels)})")
+        id_from_url = False
+        # 2. 如果網址不匹配，嘗試從 Cookie 讀取記憶中的 Client ID
+        cookie_client = request.cookies.get("tunnel_client")
+        
+        if cookie_client in active_tunnels:
+            target_client = cookie_client
+            # 因為是從 Cookie 來的，原本網址的第一段其實是路徑的一部分
+            actual_path = f"{client_id}/{path}" if path else client_id
+            logger.info(f"Cookie 路由：根據 Cookie 將請求導向至 {target_client}")
         else:
+            # 3. 如果都沒有，才回報 404
             return JSONResponse(status_code=404, content={
-                "error": "目前沒有任何客戶端連線，請啟動本地 RenderBridge 程式。",
-                "available_tunnels": []
+                "error": f"找不到客戶端 '{client_id}' 且沒有有效的會話 Cookie。",
+                "message": "請先存取 https://您的網址/您的ID/ 以建立連線記憶。",
+                "available_tunnels": list(active_tunnels.keys())
             })
 
     websocket = active_tunnels[target_client]
@@ -152,11 +154,23 @@ async def proxy_handler(client_id: str, path: str, request: Request):
         resp_headers.pop("Content-Length", None)
         
         # Construct and return the response
-        return Response(
+        response = Response(
             content=resp_body_bytes,
             status_code=response_data.get("status_code", 200),
             headers=resp_headers
         )
+
+        # 如果是透過網址明確指定 ID 進入的，幫瀏覽器種下 Cookie 記憶
+        if id_from_url:
+            response.set_cookie(
+                key="tunnel_client", 
+                value=target_client, 
+                max_age=3600 * 24, # 記憶一天
+                httponly=True,
+                samesite="lax"
+            )
+            
+        return response
     except asyncio.TimeoutError:
         return JSONResponse(status_code=504, content={"error": "Gateway Timeout: Client took too long to respond."})
     except Exception as e:
