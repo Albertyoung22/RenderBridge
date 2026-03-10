@@ -24,11 +24,19 @@ pending_requests: Dict[str, asyncio.Future] = {}
 SECRET_TOKEN = os.environ.get("TUNNEL_SECRET_TOKEN", "default_secret_token")
 
 @app.get("/")
-async def root():
+async def root(request: Request):
+    # 【改進】根目錄也檢查 Cookie，實現全網頁自動對接
+    cookie_client = request.cookies.get("tunnel_client")
+    if cookie_client in active_tunnels:
+        logger.info(f"根目錄自動路由：根據 Cookie 將請求導向至 {cookie_client}")
+        # 如果有 Cookie，就調用 proxy_handler 處理根目錄請求
+        return await proxy_handler(cookie_client, "", request)
+        
     return {
         "status": "online",
         "active_tunnels": list(active_tunnels.keys()),
-        "message": "RenderBridge Reverse Proxy Tunnel is running."
+        "message": "RenderBridge 隧道伺服器運行中 (已啟用 Cookie 記憶功能)",
+        "hint": "請使用 https://您的網址/您的ID/ 進行初始連線。"
     }
 
 @app.websocket("/tunnel/{client_id}")
@@ -167,7 +175,8 @@ async def proxy_handler(client_id: str, path: str, request: Request):
                 value=target_client, 
                 max_age=3600 * 24, # 記憶一天
                 httponly=True,
-                samesite="lax"
+                samesite="lax",
+                secure=True # 確保 HTTPS 環境下儲存成功
             )
             
         return response
