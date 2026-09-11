@@ -105,8 +105,15 @@ app = FastAPI(title="RenderBridge Server", lifespan=lifespan)
 @app.get("/")
 @app.get("/health")
 async def root(request: Request):
-    """Health check & status dashboard."""
+    """Health check & status dashboard, or automatic proxy based on cookie."""
     update_detected_url(request)
+
+    # 檢查 Cookie 是否記錄了活躍客戶端，若是則自動代理根目錄請求
+    cookie_client = request.cookies.get("tunnel_client")
+    if cookie_client and cookie_client in active_tunnels:
+        logger.info(f"根目錄自動路由：依據 Cookie 導向至 {cookie_client}")
+        return await proxy_handler(cookie_client, "", request)
+
     target_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("SELF_URL") or detected_self_url
     return {
         "status": "online",
@@ -118,7 +125,8 @@ async def root(request: Request):
             "target_url": target_url or "Waiting for first incoming request or SELF_URL env var",
             "interval_seconds": 540
         },
-        "message": "RenderBridge Reverse Proxy Tunnel is running."
+        "message": "RenderBridge 隧道伺服器運行中 (已啟用 Cookie 記憶與自適應防休眠)",
+        "hint": "請使用 https://您的網址/您的ID/ 進行初始連線。"
     }
 
 @app.websocket("/tunnel/{client_id}")
@@ -189,7 +197,7 @@ async def tunnel_endpoint(websocket: WebSocket, client_id: str, token: str = Non
     except Exception as e:
         logger.error(f"Error in tunnel {client_id}: {e}")
     finally:
-        if client_id in active_tunnels:
+        if active_tunnels.get(client_id) == websocket:
             del active_tunnels[client_id]
             
         # Fast-fail all pending HTTP requests waiting on this disconnected client
@@ -205,9 +213,14 @@ async def ws_proxy_handler(websocket: WebSocket, client_id: str, path: str):
     target_client = client_id
     actual_path = path
 
-    # Smart routing for single client
+    # 1. 檢查目標 client 是否在 active_tunnels
     if target_client not in active_tunnels:
-        if len(active_tunnels) == 1:
+        # 嘗試 Cookie 路由
+        cookie_client = websocket.cookies.get("tunnel_client")
+        if cookie_client and cookie_client in active_tunnels:
+            target_client = cookie_client
+            actual_path = f"{client_id}/{path}" if path else client_id
+        elif len(active_tunnels) == 1:
             target_client = list(active_tunnels.keys())[0]
             actual_path = f"{client_id}/{path}" if path else client_id
         else:
@@ -264,18 +277,26 @@ async def proxy_handler(client_id: str, path: str, request: Request):
     update_detected_url(request)
     target_client = client_id
     actual_path = path
+    id_from_url = True
 
     # If the requested client_id is NOT a connected client
     if target_client not in active_tunnels:
-        # Smart routing fallback if exactly ONE client is connected
-        if len(active_tunnels) == 1:
+        id_from_url = False
+        # 1. 嘗試從 Cookie 讀取記憶中的 Client ID
+        cookie_client = request.cookies.get("tunnel_client")
+        if cookie_client and cookie_client in active_tunnels:
+            target_client = cookie_client
+            actual_path = f"{client_id}/{path}" if path else client_id
+            logger.info(f"Cookie 路由：依據 Cookie 導向至 {target_client} (路徑: {actual_path})")
+        # 2. Smart routing fallback if exactly ONE client is connected
+        elif len(active_tunnels) == 1:
             target_client = list(active_tunnels.keys())[0]
-            full_path = f"{client_id}/{path}" if path else client_id
-            actual_path = full_path
-            logger.info(f"Smart-routing request /{full_path} to single client: {target_client}")
+            actual_path = f"{client_id}/{path}" if path else client_id
+            logger.info(f"Smart-routing request /{actual_path} to single client: {target_client}")
         else:
             return JSONResponse(status_code=404, content={
-                "error": f"Tunnel '{client_id}' not found.",
+                "error": f"找不到客戶端 '{client_id}' 且無有效會話 Cookie。",
+                "message": "請先存取 https://您的網址/您的客戶端ID/ 以建立連線記憶。",
                 "available_tunnels": list(active_tunnels.keys())
             })
 
@@ -341,11 +362,24 @@ async def proxy_handler(client_id: str, path: str, request: Request):
         resp_headers.pop("content-length", None)
         resp_headers.pop("Content-Length", None)
         
-        return Response(
+        response = Response(
             content=resp_body_bytes,
             status_code=response_data.get("status_code", 200),
             headers=resp_headers
         )
+
+        # 若是由明確的 Client ID 路徑進入，為瀏覽器設置 Cookie 記憶 (有效期 24 小時)
+        if id_from_url:
+            response.set_cookie(
+                key="tunnel_client",
+                value=target_client,
+                max_age=3600 * 24,
+                httponly=True,
+                samesite="lax",
+                secure=True
+            )
+
+        return response
     except HTTPException as he:
         # Client abruptly disconnected
         return JSONResponse(status_code=he.status_code, content={"error": he.detail})
