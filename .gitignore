@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+
+# Build & Dist artifacts
+build/
+dist/
+*.spec
+
+# Project & local config
+config.json
+.vscode/
+.idea/
+*.log
