@@ -17,6 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RenderBridge-Server")
 
 # Server state
+VERSION = "1.2.0"
 server_start_time = time.time()
 
 # Dictionary to manage active tunnels: {client_id: WebSocket}
@@ -117,6 +118,7 @@ async def root(request: Request):
     target_url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("SELF_URL") or detected_self_url
     return {
         "status": "online",
+        "version": VERSION,
         "uptime_seconds": int(time.time() - server_start_time),
         "active_tunnels": list(active_tunnels.keys()),
         "pending_requests": len(pending_requests),
@@ -254,7 +256,12 @@ async def ws_proxy_handler(websocket: WebSocket, client_id: str, path: str):
     try:
         while True:
             data = await websocket.receive_text()
-            await tunnel_ws.send_text(json.dumps({
+            cur_tunnel = active_tunnels.get(target_client)
+            if not cur_tunnel:
+                logger.info(f"WS Proxy: 隧道 {target_client} 已離線，主動中斷外部客戶端以觸發重連")
+                await websocket.close(code=4004)
+                break
+            await cur_tunnel.send_text(json.dumps({
                 "type": "ws_message",
                 "request_id": request_id,
                 "data": data
@@ -264,12 +271,18 @@ async def ws_proxy_handler(websocket: WebSocket, client_id: str, path: str):
     finally:
         active_ws_sessions.pop(request_id, None)
         try:
-            await tunnel_ws.send_text(json.dumps({
-                "type": "ws_close",
-                "request_id": request_id
-            }))
+            await websocket.close()
         except:
             pass
+        cur_tunnel = active_tunnels.get(target_client)
+        if cur_tunnel:
+            try:
+                await cur_tunnel.send_text(json.dumps({
+                    "type": "ws_close",
+                    "request_id": request_id
+                }))
+            except:
+                pass
 
 @app.api_route("/{client_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def proxy_handler(client_id: str, path: str, request: Request):
@@ -361,6 +374,13 @@ async def proxy_handler(client_id: str, path: str, request: Request):
         # Remove Content-Length to let FastAPI/Starlette recalculate correctly
         resp_headers.pop("content-length", None)
         resp_headers.pop("Content-Length", None)
+
+        # 自動校正重導向 Location：若包含相對路徑且無 client_id，自動補上 /{target_client}
+        loc_key = next((k for k in resp_headers if k.lower() == "location"), None)
+        if loc_key:
+            loc = resp_headers[loc_key]
+            if loc.startswith("/") and not loc.startswith(f"/{target_client}"):
+                resp_headers[loc_key] = f"/{target_client}{loc}"
         
         response = Response(
             content=resp_body_bytes,
@@ -394,4 +414,4 @@ async def proxy_handler(client_id: str, path: str, request: Request):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, ws_max_size=67108864)

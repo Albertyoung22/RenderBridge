@@ -3,7 +3,7 @@ services:
     name: render-bridge-server
     env: python
     buildCommand: pip install -r server/requirements.txt
-    startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT --ws-max-size 67108864
     envVars:
       - key: TUNNEL_SECRET_TOKEN
         generateValue: true # Render will generate a random secret for you
