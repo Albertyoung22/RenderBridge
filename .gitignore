@@ -16,3 +16,5 @@ config.json
 .vscode/
 .idea/
 *.log
+push_now.bat
+do_push.py
